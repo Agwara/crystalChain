@@ -94,32 +94,3 @@ contract DeployPlatformToken is Script {
         console.log("==================================\n");
     }
 }
-
-// Contract for testing deployment on local network
-contract LocalDeploymentTest is Script {
-    function run() external {
-        vm.startBroadcast();
-
-        // Deploy with smaller supply for testing
-        uint256 testSupply = 100_000 * 10 ** 18; // 100k tokens
-        PlatformToken token = new PlatformToken(testSupply);
-
-        console.log("Test deployment completed:");
-        console.log("Token address:", address(token));
-        console.log("Test supply:", testSupply);
-
-        // Create some test users
-        address alice = address(0x1);
-        address bob = address(0x2);
-
-        // Give them some tokens
-        token.transfer(alice, 10_000 * 10 ** 18);
-        token.transfer(bob, 10_000 * 10 ** 18);
-
-        console.log("Test users funded:");
-        console.log("Alice balance:", token.balanceOf(alice));
-        console.log("Bob balance:", token.balanceOf(bob));
-
-        vm.stopBroadcast();
-    }
-}
