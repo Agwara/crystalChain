@@ -1,193 +1,452 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {PlatformToken} from "./PlatformToken.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "./VRFConsumer.sol";
+
+interface IPlatformToken is IERC20 {
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address to, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function burnFrom(address from, uint256 amount) external;
+    function mint(address to, uint256 amount) external;
+    function stakedBalance(address user) external view returns (uint256);
+    function isEligibleForBenefits(address user) external view returns (bool);
+    function getStakingWeight(address user) external view returns (uint256);
+    function MIN_STAKE_AMOUNT() external view returns (uint256);
+}
 
 /**
  * @title LotteryGame
  * @author Agwara Nnaemeka
- * @notice A decentralized lottery game contract that allows users to place bets, participate in rounds, and receive gifts.
- * @dev This contract manages the lottery rounds, user bets, and prize distributions.
- * It uses PlatformToken for token transfers and staking benefits.
- * The game operates in 5-minute rounds with specific rules for betting and gift distribution.
+ * @dev Decentralized lottery game with 5-number prediction (1-49)
+ * @notice Users stake tokens to participate, system gifts tokens to creator and winners
  */
-contract LotteryGame is Ownable, ReentrancyGuard {
-    PlatformToken public immutable platformToken;
+contract LotteryGame is VRFConsumer, ReentrancyGuard, Ownable, Pausable {
+    // =============================================================
+    //                           CONSTANTS
+    // =============================================================
 
-    // Game Configuration
-    uint256 public constant ROUND_DURATION = 5 minutes;
-    uint256 public constant NUMBERS_COUNT = 5;
+    /// @notice Numbers range from 1 to MAX_NUMBER
     uint256 public constant MAX_NUMBER = 49;
-    uint256 public constant BET_AMOUNT = 10 * 10 ** 18; // 10 tokens
 
-    // Gift Configuration
-    uint256 public constant GIFT_WINNERS_COUNT = 10;
-    uint256 public constant GIFT_COOLDOWN = 7 days; // Users can't receive gifts for 7 days
-    uint256 public constant CREATOR_GIFT_AMOUNT = 100 * 10 ** 18;
-    uint256 public constant WINNER_GIFT_AMOUNT = 50 * 10 ** 18;
+    /// @notice Number of numbers to draw
+    uint256 public constant NUMBERS_COUNT = 5;
 
-    // Current Round Data
+    /// @notice Round duration (5 minutes)
+    uint256 public constant ROUND_DURATION = 5 minutes;
+
+    /// @notice Minimum bet amount
+    uint256 public constant MIN_BET_AMOUNT = 1 * 10 ** 18; // 1 token
+
+    /// @notice Maximum bet amount per user per round
+    uint256 public constant MAX_BET_PER_USER_PER_ROUND = 1000 * 10 ** 18; // 1000 tokens
+
+    /// @notice Gift cooldown period (24 hours)
+    uint256 public constant GIFT_COOLDOWN = 24 hours;
+
+    /// @notice Consecutive play requirement for gifts (3 rounds)
+    uint256 public constant CONSECUTIVE_PLAY_REQUIREMENT = 3;
+
+    /// @notice Number of random words needed
+    uint32 private constant NUM_WORDS = 5;
+
+    // =============================================================
+    //                            STORAGE
+    // =============================================================
+
+    /// @notice Platform token contract
+    IPlatformToken public immutable platformToken;
+
+    /// @notice Current round number
+    uint256 public currentRound;
+
+    /// @notice Number of gift recipients per round (excluding creator)
+    uint256 public giftRecipientsCount = 10;
+
+    /// @notice Creator gift amount per round
+    uint256 public creatorGiftAmount = 100 * 10 ** 18; // 100 tokens
+
+    /// @notice Regular user gift amount per round
+    uint256 public userGiftAmount = 50 * 10 ** 18; // 50 tokens
+
+    /// @notice Platform creator address
+    address public immutable creator;
+
+    // Round structure
     struct Round {
         uint256 roundId;
         uint256 startTime;
         uint256 endTime;
-        uint256[5] winningNumbers;
+        uint256[NUMBERS_COUNT] winningNumbers;
         bool numbersDrawn;
-        address[] participants;
-        mapping(address => uint256[5]) predictions;
+        uint256 totalBets;
         uint256 totalPrizePool;
+        address[] participants;
+        bool giftsDistributed;
+        uint256 vrfRequestId;
     }
 
-    // Gift Tracking
-    mapping(address => uint256) public lastGiftTime;
-    mapping(address => uint256) public consecutiveRounds;
-    mapping(address => bool) public hasPlayedInCurrentRound;
+    // Bet structure
+    struct Bet {
+        address user;
+        uint256[NUMBERS_COUNT] numbers;
+        uint256 amount;
+        uint256 timestamp;
+        uint8 matchCount;
+        bool claimed;
+    }
 
-    uint256 public currentRoundId;
+    // User tracking for consecutive play and gifts
+    struct UserStats {
+        uint256 lastGiftRound;
+        uint256 consecutiveRounds;
+        uint256 totalBets;
+        uint256 totalWinnings;
+        bool isEligibleForGift;
+    }
+
+    // =============================================================
+    //                           MAPPINGS
+    // =============================================================
+
+    /// @notice Round information
     mapping(uint256 => Round) public rounds;
 
-    address public creator;
+    /// @notice Bets for each round
+    mapping(uint256 => Bet[]) public roundBets;
 
-    // Events
+    /// @notice User bets in specific round
+    mapping(uint256 => mapping(address => uint256[])) public userRoundBets;
+
+    /// @notice Total bet amount per user per round
+    mapping(uint256 => mapping(address => uint256)) public userRoundBetAmount;
+
+    /// @notice User statistics
+    mapping(address => UserStats) public userStats;
+
+    /// @notice VRF request ID to round mapping
+    mapping(uint256 => uint256) public vrfRequestToRound;
+
+    /// @notice Users who participated in each round
+    mapping(uint256 => mapping(address => bool)) public roundParticipants;
+
+    /// @notice Last round a user participated in
+    mapping(address => uint256) public lastParticipatedRound;
+
+    // =============================================================
+    //                            EVENTS
+    // =============================================================
+
     event RoundStarted(uint256 indexed roundId, uint256 startTime, uint256 endTime);
-    event BetPlaced(address indexed player, uint256 indexed roundId, uint256[5] numbers);
-    event NumbersDrawn(uint256 indexed roundId, uint256[5] winningNumbers);
-    event PrizeDistributed(uint256 indexed roundId, address indexed winner, uint256 amount);
-    event GiftDistributed(address indexed recipient, uint256 amount, bool isCreator);
+    event BetPlaced(uint256 indexed roundId, address indexed user, uint256[NUMBERS_COUNT] numbers, uint256 amount);
+    event NumbersDrawn(uint256 indexed roundId, uint256[NUMBERS_COUNT] winningNumbers);
+    event WinningsClaimed(uint256 indexed roundId, address indexed user, uint256 amount, uint8 matchCount);
+    event GiftDistributed(uint256 indexed roundId, address indexed recipient, uint256 amount, bool isCreator);
+    event GiftSettingsUpdated(uint256 recipientsCount, uint256 creatorAmount, uint256 userAmount);
 
-    constructor(address _platformToken, address _creator) Ownable(msg.sender) {
-        platformToken = PlatformToken(_platformToken);
+    // =============================================================
+    //                            ERRORS
+    // =============================================================
+
+    error InvalidNumbers();
+    error BetAmountTooLow();
+    error BetAmountTooHigh();
+    error ExceedsMaxBetPerRound();
+    error RoundNotActive();
+    error RoundNotEnded();
+    error NumbersNotDrawn();
+    error NotEligibleForBetting();
+    error NoWinnings();
+    error AlreadyClaimed();
+    error GiftsAlreadyDistributed();
+    error InvalidRound();
+
+    // =============================================================
+    //                         CONSTRUCTOR
+    // =============================================================
+
+    constructor(
+        address _platformToken,
+        address _vrfCoordinator,
+        uint64 _subscriptionId,
+        bytes32 _keyHash,
+        address _creator
+    ) VRFConsumer(_vrfCoordinator, _subscriptionId, _keyHash) Ownable(msg.sender) {
+        platformToken = IPlatformToken(_platformToken);
         creator = _creator;
+
+        // Start first round
         _startNewRound();
     }
 
+    // =============================================================
+    //                        BETTING FUNCTIONS
+    // =============================================================
+
     /**
-     * @notice Place a bet for the current round
-     * @param numbers Array of 5 numbers (1-49) to predict
+     * @notice Place a bet on current round
+     * @param numbers Array of 5 numbers (1-49)
+     * @param amount Bet amount in tokens
      */
-    function placeBet(uint256[5] memory numbers) external nonReentrant {
-        Round storage round = rounds[currentRoundId];
+    function placeBet(uint256[NUMBERS_COUNT] calldata numbers, uint256 amount) external nonReentrant whenNotPaused {
+        Round storage round = rounds[currentRound];
 
-        // Validation
-        require(block.timestamp < round.endTime, "Round ended");
-        require(platformToken.isEligibleForBenefits(msg.sender), "Must stake tokens first");
-        require(!hasPlayedInCurrentRound[msg.sender], "Already played this round");
-
-        // Validate numbers
-        for (uint256 i = 0; i < 5; i++) {
-            require(numbers[i] >= 1 && numbers[i] <= MAX_NUMBER, "Invalid number");
+        if (block.timestamp >= round.endTime) revert RoundNotActive();
+        if (amount < MIN_BET_AMOUNT) revert BetAmountTooLow();
+        if (platformToken.getStakingWeight(msg.sender) < platformToken.MIN_STAKE_AMOUNT()) {
+            revert NotEligibleForBetting();
         }
 
-        // Transfer bet amount
-        platformToken.transferFrom(msg.sender, address(this), BET_AMOUNT);
+        // Check max bet per user per round
+        if (userRoundBetAmount[currentRound][msg.sender] + amount > MAX_BET_PER_USER_PER_ROUND) {
+            revert ExceedsMaxBetPerRound();
+        }
 
-        // Record bet
-        round.participants.push(msg.sender);
-        round.predictions[msg.sender] = numbers;
-        round.totalPrizePool += BET_AMOUNT;
-        hasPlayedInCurrentRound[msg.sender] = true;
+        // Validate numbers (1-49, no duplicates, sorted)
+        _validateNumbers(numbers);
 
-        // Update consecutive rounds counter
-        consecutiveRounds[msg.sender]++;
+        // Transfer bet amount from user
+        platformToken.transferFrom(msg.sender, address(this), amount);
 
-        emit BetPlaced(msg.sender, currentRoundId, numbers);
+        // Create bet
+        Bet memory newBet = Bet({
+            user: msg.sender,
+            numbers: numbers,
+            amount: amount,
+            timestamp: block.timestamp,
+            matchCount: 0,
+            claimed: false
+        });
+
+        // Store bet
+        uint256 betIndex = roundBets[currentRound].length;
+        roundBets[currentRound].push(newBet);
+        userRoundBets[currentRound][msg.sender].push(betIndex);
+        userRoundBetAmount[currentRound][msg.sender] += amount;
+
+        // Update round stats
+        round.totalBets += amount;
+        round.totalPrizePool += amount;
+
+        // Track participation
+        if (!roundParticipants[currentRound][msg.sender]) {
+            roundParticipants[currentRound][msg.sender] = true;
+            round.participants.push(msg.sender);
+
+            // Update user consecutive rounds
+            UserStats storage stats = userStats[msg.sender];
+
+            if (lastParticipatedRound[msg.sender] == currentRound - 1) {
+                stats.consecutiveRounds++;
+            } else if (lastParticipatedRound[msg.sender] != currentRound) {
+                stats.consecutiveRounds = 1;
+            }
+
+            lastParticipatedRound[msg.sender] = currentRound;
+            stats.isEligibleForGift = stats.consecutiveRounds >= CONSECUTIVE_PLAY_REQUIREMENT;
+        }
+
+        userStats[msg.sender].totalBets += amount;
+
+        emit BetPlaced(currentRound, msg.sender, numbers, amount);
+
+        // Auto-end round if time is up
+        if (block.timestamp >= round.endTime && !round.numbersDrawn) {
+            _endRound();
+        }
     }
 
     /**
-     * @notice End current round and start new one (called by automation or admin)
+     * @notice Get user's bets for a specific round
+     * @param roundId Round to check
+     * @param user User address
+     * @return Array of bet indices
      */
-    function endRoundAndStartNew() external onlyOwner {
-        Round storage round = rounds[currentRoundId];
-        require(block.timestamp >= round.endTime, "Round not finished");
-        require(!round.numbersDrawn, "Numbers already drawn");
+    function getUserRoundBets(uint256 roundId, address user) external view returns (uint256[] memory) {
+        return userRoundBets[roundId][user];
+    }
 
-        // Generate random numbers (simplified - use Chainlink VRF in production)
-        uint256[5] memory winningNumbers = _generateRandomNumbers();
+    /**
+     * @notice Get bet details
+     * @param roundId Round number
+     * @param betIndex Index of bet in round
+     */
+    function getBet(uint256 roundId, uint256 betIndex) external view returns (Bet memory) {
+        return roundBets[roundId][betIndex];
+    }
+
+    // =============================================================
+    //                        ROUND MANAGEMENT
+    // =============================================================
+
+    /**
+     * @notice End current round and request random numbers
+     */
+    function endRound() external {
+        Round storage round = rounds[currentRound];
+        if (block.timestamp < round.endTime) revert RoundNotEnded();
+        if (round.numbersDrawn) revert InvalidRound();
+
+        _endRound();
+    }
+
+    /**
+     * @notice Internal function to end round and request VRF
+     */
+    function _endRound() internal {
+        Round storage round = rounds[currentRound];
+
+        // Request random numbers from Chainlink VRF
+        uint256 requestId = _requestRandomWords(NUM_WORDS);
+
+        round.vrfRequestId = requestId;
+        vrfRequestToRound[requestId] = currentRound;
+    }
+
+    /**
+     * @notice Handle random words from VRF
+     * @dev Overrides VRFConsumer's _handleRandomWords function
+     */
+    function _handleRandomWords(uint256 requestId, uint256[] memory randomWords) internal override {
+        uint256 roundId = vrfRequestToRound[requestId];
+        Round storage round = rounds[roundId];
+
+        // Generate 5 unique numbers from 1-49
+        uint256[NUMBERS_COUNT] memory winningNumbers = _generateWinningNumbers(randomWords);
         round.winningNumbers = winningNumbers;
         round.numbersDrawn = true;
 
-        emit NumbersDrawn(currentRoundId, winningNumbers);
+        // Calculate match counts for all bets
+        _calculateMatches(roundId);
 
-        // Distribute prizes
-        _distributePrizes(currentRoundId);
+        emit NumbersDrawn(roundId, winningNumbers);
 
-        // Distribute gifts
-        _distributeGifts();
-
-        // Reset consecutive counters for non-participants
-        _resetNonParticipants();
-
-        // Start new round
-        _startNewRound();
+        // Start new round if this was current round
+        if (roundId == currentRound) {
+            _startNewRound();
+        }
     }
 
     /**
      * @notice Start a new round
      */
     function _startNewRound() internal {
-        currentRoundId++;
-        Round storage newRound = rounds[currentRoundId];
-        newRound.roundId = currentRoundId;
+        currentRound++;
+
+        Round storage newRound = rounds[currentRound];
+        newRound.roundId = currentRound;
         newRound.startTime = block.timestamp;
         newRound.endTime = block.timestamp + ROUND_DURATION;
 
-        // Reset current round participation
-        // Note: We'll need to track participants to reset this mapping
+        emit RoundStarted(currentRound, newRound.startTime, newRound.endTime);
+    }
 
-        emit RoundStarted(currentRoundId, newRound.startTime, newRound.endTime);
+    // =============================================================
+    //                        WINNING & CLAIMING
+    // =============================================================
+
+    /**
+     * @notice Claim winnings for specific bets
+     * @param roundId Round to claim from
+     * @param betIndices Array of bet indices to claim
+     */
+    function claimWinnings(uint256 roundId, uint256[] calldata betIndices) external nonReentrant {
+        Round storage round = rounds[roundId];
+        if (!round.numbersDrawn) revert NumbersNotDrawn();
+
+        uint256 totalWinnings = 0;
+
+        for (uint256 i = 0; i < betIndices.length; i++) {
+            uint256 betIndex = betIndices[i];
+            Bet storage bet = roundBets[roundId][betIndex];
+
+            if (bet.user != msg.sender) continue;
+            if (bet.claimed) revert AlreadyClaimed();
+            if (bet.matchCount == 0) continue;
+
+            uint256 payout = _calculatePayout(bet.amount, bet.matchCount);
+            bet.claimed = true;
+            totalWinnings += payout;
+
+            emit WinningsClaimed(roundId, msg.sender, payout, bet.matchCount);
+        }
+
+        if (totalWinnings == 0) revert NoWinnings();
+
+        userStats[msg.sender].totalWinnings += totalWinnings;
+        platformToken.transfer(msg.sender, totalWinnings);
     }
 
     /**
-     * @notice Distribute gifts to creator and random winners
+     * @notice Calculate payout based on match count
      */
-    function _distributeGifts() internal {
-        // Gift creator (always eligible)
-        if (consecutiveRounds[creator] > 0) {
-            platformToken.transfer(creator, CREATOR_GIFT_AMOUNT);
-            emit GiftDistributed(creator, CREATOR_GIFT_AMOUNT, true);
+    function _calculatePayout(uint256 betAmount, uint8 matchCount) internal pure returns (uint256) {
+        if (matchCount == 5) return betAmount * 1000; // 5 matches: 1000x
+        if (matchCount == 4) return betAmount * 100; // 4 matches: 100x
+        if (matchCount == 3) return betAmount * 10; // 3 matches: 10x
+        if (matchCount == 2) return betAmount * 2; // 2 matches: 2x
+        return 0; // Less than 2 matches: no payout
+    }
+
+    // =============================================================
+    //                        GIFT SYSTEM
+    // =============================================================
+
+    /**
+     * @notice Distribute gifts for completed round
+     * @param roundId Round to distribute gifts for
+     */
+    function distributeGifts(uint256 roundId) external onlyOwner {
+        Round storage round = rounds[roundId];
+        if (!round.numbersDrawn) revert NumbersNotDrawn();
+        if (round.giftsDistributed) revert GiftsAlreadyDistributed();
+
+        round.giftsDistributed = true;
+
+        // Gift creator
+        platformToken.transfer(creator, creatorGiftAmount);
+        emit GiftDistributed(roundId, creator, creatorGiftAmount, true);
+
+        // Find eligible users for gifts
+        address[] memory eligibleUsers = _getEligibleGiftRecipients(roundId);
+
+        uint256 recipientsToGift = giftRecipientsCount;
+        if (eligibleUsers.length < recipientsToGift) {
+            recipientsToGift = eligibleUsers.length;
         }
 
-        // Select random winners from eligible participants
-        address[] memory eligibleWinners = _getEligibleGiftRecipients();
+        // Randomly select and gift users
+        for (uint256 i = 0; i < recipientsToGift; i++) {
+            address recipient = eligibleUsers[i];
+            userStats[recipient].lastGiftRound = roundId;
 
-        uint256 winnersToGift =
-            eligibleWinners.length < GIFT_WINNERS_COUNT ? eligibleWinners.length : GIFT_WINNERS_COUNT;
-
-        // Distribute gifts to random winners (simplified selection)
-        for (uint256 i = 0; i < winnersToGift; i++) {
-            uint256 randomIndex = uint256(keccak256(abi.encode(block.timestamp, i))) % eligibleWinners.length;
-            address winner = eligibleWinners[randomIndex];
-
-            platformToken.transfer(winner, WINNER_GIFT_AMOUNT);
-            lastGiftTime[winner] = block.timestamp;
-            emit GiftDistributed(winner, WINNER_GIFT_AMOUNT, false);
-
-            // Remove winner from array to avoid duplicates
-            eligibleWinners[randomIndex] = eligibleWinners[eligibleWinners.length - 1];
-            // Note: This is simplified - proper implementation needs array manipulation
+            platformToken.transfer(recipient, userGiftAmount);
+            emit GiftDistributed(roundId, recipient, userGiftAmount, false);
         }
     }
 
     /**
-     * @notice Get users eligible for gifts
+     * @notice Get eligible gift recipients for a round
      */
-    function _getEligibleGiftRecipients() internal view returns (address[] memory) {
-        Round storage round = rounds[currentRoundId];
+    function _getEligibleGiftRecipients(uint256 roundId) internal view returns (address[] memory) {
+        Round storage round = rounds[roundId];
         address[] memory eligible = new address[](round.participants.length);
         uint256 count = 0;
 
         for (uint256 i = 0; i < round.participants.length; i++) {
-            address participant = round.participants[i];
+            address user = round.participants[i];
+            UserStats storage stats = userStats[user];
 
-            // Must be staking, playing consecutively, and not recently gifted
+            // Check eligibility: consecutive play, not recently gifted
             if (
-                platformToken.stakedBalance(participant) >= platformToken.MIN_STAKE_AMOUNT()
-                    && consecutiveRounds[participant] >= 2 // At least 2 consecutive rounds
-                    && block.timestamp >= lastGiftTime[participant] + GIFT_COOLDOWN && participant != creator
+                stats.isEligibleForGift && user != creator
+                    && (stats.lastGiftRound == 0 || roundId >= stats.lastGiftRound + GIFT_COOLDOWN / ROUND_DURATION)
             ) {
-                eligible[count] = participant;
+                eligible[count] = user;
                 count++;
             }
         }
@@ -201,50 +460,184 @@ contract LotteryGame is Ownable, ReentrancyGuard {
         return result;
     }
 
+    // =============================================================
+    //                        HELPER FUNCTIONS
+    // =============================================================
+
     /**
-     * @notice Reset consecutive rounds for users who didn't participate
+     * @notice Validate lottery numbers
      */
-    function _resetNonParticipants() internal {
-        // This would need a more sophisticated approach in production
-        // Maybe maintain a list of all users who have ever played
+    function _validateNumbers(uint256[NUMBERS_COUNT] calldata numbers) internal pure {
+        for (uint256 i = 0; i < NUMBERS_COUNT; i++) {
+            if (numbers[i] == 0 || numbers[i] > MAX_NUMBER) revert InvalidNumbers();
+
+            // Check for duplicates
+            for (uint256 j = i + 1; j < NUMBERS_COUNT; j++) {
+                if (numbers[i] == numbers[j]) revert InvalidNumbers();
+            }
+        }
+
+        // Ensure numbers are sorted
+        for (uint256 i = 0; i < NUMBERS_COUNT - 1; i++) {
+            if (numbers[i] >= numbers[i + 1]) revert InvalidNumbers();
+        }
     }
 
     /**
-     * @notice Generate random numbers (placeholder - use Chainlink VRF)
+     * @notice Generate winning numbers from VRF random words
      */
-    function _generateRandomNumbers() internal view returns (uint256[5] memory) {
-        uint256[5] memory numbers;
-        for (uint256 i = 0; i < 5; i++) {
-            numbers[i] = (uint256(keccak256(abi.encode(block.timestamp, block.prevrandao, i))) % MAX_NUMBER) + 1;
+    function _generateWinningNumbers(uint256[] memory randomWords)
+        internal
+        pure
+        returns (uint256[NUMBERS_COUNT] memory)
+    {
+        uint256[NUMBERS_COUNT] memory numbers;
+        bool[MAX_NUMBER + 1] memory used;
+
+        for (uint256 i = 0; i < NUMBERS_COUNT; i++) {
+            uint256 randomValue = randomWords[i];
+            uint256 number;
+
+            do {
+                number = (randomValue % MAX_NUMBER) + 1;
+                randomValue = uint256(keccak256(abi.encode(randomValue)));
+            } while (used[number]);
+
+            used[number] = true;
+            numbers[i] = number;
         }
+
+        // Sort numbers
+        for (uint256 i = 0; i < NUMBERS_COUNT - 1; i++) {
+            for (uint256 j = i + 1; j < NUMBERS_COUNT; j++) {
+                if (numbers[i] > numbers[j]) {
+                    uint256 temp = numbers[i];
+                    numbers[i] = numbers[j];
+                    numbers[j] = temp;
+                }
+            }
+        }
+
         return numbers;
     }
 
     /**
-     * @notice Distribute prizes based on matching numbers
+     * @notice Calculate matches for all bets in a round
      */
-    function _distributePrizes(uint256 roundId) internal view {
-        // Round storage round = rounds[roundId];
-        // Implementation for prize distribution based on number matches
-        // This would check each participant's predictions against winning numbers
+    function _calculateMatches(uint256 roundId) internal {
+        Round storage round = rounds[roundId];
+        Bet[] storage bets = roundBets[roundId];
+
+        for (uint256 i = 0; i < bets.length; i++) {
+            uint8 matches = 0;
+
+            for (uint256 j = 0; j < NUMBERS_COUNT; j++) {
+                for (uint256 k = 0; k < NUMBERS_COUNT; k++) {
+                    if (bets[i].numbers[j] == round.winningNumbers[k]) {
+                        matches++;
+                        break;
+                    }
+                }
+            }
+
+            bets[i].matchCount = matches;
+        }
     }
 
-    // View functions
-    function getCurrentRound()
+    // =============================================================
+    //                        VIEW FUNCTIONS
+    // =============================================================
+
+    /**
+     * @notice Get current round information
+     */
+    function getCurrentRound() external view returns (Round memory) {
+        return rounds[currentRound];
+    }
+
+    /**
+     * @notice Get round information
+     */
+    function getRound(uint256 roundId) external view returns (Round memory) {
+        return rounds[roundId];
+    }
+
+    /**
+     * @notice Get user statistics
+     */
+    function getUserStats(address user) external view returns (UserStats memory) {
+        return userStats[user];
+    }
+
+    /**
+     * @notice Check if user can claim winnings for specific bets
+     */
+    function getClaimableWinnings(uint256 roundId, address user)
         external
         view
-        returns (uint256 roundId, uint256 startTime, uint256 endTime, uint256 totalPrizePool)
+        returns (uint256 totalWinnings, uint256[] memory claimableBets)
     {
-        Round storage round = rounds[currentRoundId];
-        return (round.roundId, round.startTime, round.endTime, round.totalPrizePool);
+        Round storage round = rounds[roundId];
+        if (!round.numbersDrawn) return (0, new uint256[](0));
+
+        uint256[] storage userBets = userRoundBets[roundId][user];
+        uint256[] memory claimable = new uint256[](userBets.length);
+        uint256 count = 0;
+
+        for (uint256 i = 0; i < userBets.length; i++) {
+            uint256 betIndex = userBets[i];
+            Bet storage bet = roundBets[roundId][betIndex];
+
+            if (!bet.claimed && bet.matchCount > 1) {
+                claimable[count] = betIndex;
+                count++;
+                totalWinnings += _calculatePayout(bet.amount, bet.matchCount);
+            }
+        }
+
+        // Resize array
+        claimableBets = new uint256[](count);
+        for (uint256 i = 0; i < count; i++) {
+            claimableBets[i] = claimable[i];
+        }
     }
 
-    function getUserPrediction(uint256 roundId, address user) external view returns (uint256[5] memory) {
-        return rounds[roundId].predictions[user];
+    // =============================================================
+    //                        ADMIN FUNCTIONS
+    // =============================================================
+
+    /**
+     * @notice Update gift settings
+     */
+    function updateGiftSettings(uint256 _recipientsCount, uint256 _creatorAmount, uint256 _userAmount)
+        external
+        onlyOwner
+    {
+        giftRecipientsCount = _recipientsCount;
+        creatorGiftAmount = _creatorAmount;
+        userGiftAmount = _userAmount;
+
+        emit GiftSettingsUpdated(_recipientsCount, _creatorAmount, _userAmount);
     }
 
-    function isEligibleForGifts(address user) external view returns (bool) {
-        return platformToken.stakedBalance(user) >= platformToken.MIN_STAKE_AMOUNT() && consecutiveRounds[user] >= 2
-            && block.timestamp >= lastGiftTime[user] + GIFT_COOLDOWN;
+    /**
+     * @notice Pause contract
+     */
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    /**
+     * @notice Unpause contract
+     */
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
+    /**
+     * @notice Emergency withdraw tokens
+     */
+    function emergencyWithdraw(uint256 amount) external onlyOwner {
+        platformToken.transfer(owner(), amount);
     }
 }
