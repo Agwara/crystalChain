@@ -1,8 +1,17 @@
+# foundry.toml
 [profile.default]
+ffi = true
 src = "src"
 out = "out"
 libs = ["lib"]
-remappings = ["@openzeppelin/=lib/openzeppelin-contracts/"]
+remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]
+
+# Sepolia testnet configuration
+[rpc_endpoints]
+sepolia = "https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_API_KEY}"
+
+[etherscan]
+sepolia = { key = "${ETHERSCAN_API_KEY}", url = "https://api-sepolia.etherscan.io/api" }
 
 # Test configuration
 [profile.default.fuzz]
@@ -13,4 +22,21 @@ dictionary_weight = 40
 include_storage = true
 include_push_bytes = true
 
-# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+# Gas reporting
+gas_reports = ["*"]
+gas_reports_ignore = ["test/**/*"]
+
+# Coverage
+[profile.coverage]
+verbosity = 3
+no_match_test = "testFail"
+
+# CI profile
+[profile.ci]
+fuzz = { runs = 10000 }
+verbosity = 4
+
+# Local testing
+[profile.local]
+verbosity = 2
+gas_reports = ["PlatformToken"]
