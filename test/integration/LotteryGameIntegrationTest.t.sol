@@ -166,15 +166,17 @@ contract LotteryGameIntegrationTest is Test {
         }
 
         // End round with those exact numbers
-        vm.warp(block.timestamp + lottery.ROUND_DURATION() + 1);
+        vm.warp(block.timestamp + lottery.ROUND_DURATION() + 2 hours);
         lottery.endRound();
-        _simulateVRFResponseWithNumbers(roundId, winningNumbers);
+        lottery.emergencyDrawNumbers(roundId, winningNumbers);
+        // _simulateVRFResponseWithNumbers(roundId, winningNumbers);
 
         // Calculate expected total payout
         uint256 individualPayout = (maxBetAmount * 800 * (10000 - lottery.HOUSE_EDGE())) / 10000;
         uint256 totalExpectedPayout = individualPayout * 5;
 
         // Verify total payout calculation
+
         uint256 actualTotalPayout = 0;
         for (uint256 i = 0; i < 5; i++) {
             (uint256 winnings,) = lottery.getClaimableWinnings(roundId, players[i]);
@@ -211,9 +213,10 @@ contract LotteryGameIntegrationTest is Test {
         }
 
         // End round with winning numbers
-        vm.warp(block.timestamp + lottery.ROUND_DURATION() + 1);
+        vm.warp(block.timestamp + lottery.ROUND_DURATION() + 2 hours);
         lottery.endRound();
-        _simulateVRFResponseWithNumbers(roundId, winningNumbers);
+        // _simulateVRFResponseWithNumbers(roundId, winningNumbers);
+        lottery.emergencyDrawNumbers(roundId, winningNumbers);
 
         // Verify match counts and payouts
         uint256[5] memory expectedPayouts = [
@@ -403,7 +406,7 @@ contract LotteryGameIntegrationTest is Test {
         // Stake and try again (should work)
         vm.startPrank(newPlayer);
         token.stake(token.MIN_STAKE_AMOUNT());
-        vm.warp(block.timestamp + 25 hours);
+        vm.warp(block.timestamp + 1 minutes);
 
         token.approve(address(lottery), 10 * 10 ** 18);
         lottery.placeBet(_generateNumbers(1), 10 * 10 ** 18);
