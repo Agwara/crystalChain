@@ -2,7 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "./VRFConsumer.sol";
@@ -12,7 +12,6 @@ interface IPlatformToken is IERC20 {
     function transfer(address to, uint256 amount) external returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
     function burnFrom(address from, uint256 amount) external;
-    function mint(address to, uint256 amount) external;
     function stakedBalance(address user) external view returns (uint256);
     function isEligibleForBenefits(address user) external view returns (bool);
     function getStakingWeight(address user) external view returns (uint256);
@@ -25,7 +24,7 @@ interface IPlatformToken is IERC20 {
  * @dev Decentralized lottery game with 5-number prediction (1-49)
  * @notice Users stake tokens to participate, system gifts tokens to creator and winners
  */
-contract LotteryGame is VRFConsumer, ReentrancyGuard, Ownable, Pausable {
+contract LotteryGame is VRFConsumer, ReentrancyGuard, AccessControl, Pausable {
     // =============================================================
     //                           CONSTANTS
     // =============================================================
@@ -54,6 +53,13 @@ contract LotteryGame is VRFConsumer, ReentrancyGuard, Ownable, Pausable {
     /// @notice Number of random words needed
     uint32 private constant NUM_WORDS = 5;
 
+    /// @notice House edge in basis points (5%)
+    uint256 public constant HOUSE_EDGE = 500;
+
+    /// @notice Role identifiers
+    bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
+    bytes32 public constant GIFT_DISTRIBUTOR_ROLE = keccak256("GIFT_DISTRIBUTOR_ROLE");
+
     // =============================================================
     //                            STORAGE
     // =============================================================
@@ -75,6 +81,15 @@ contract LotteryGame is VRFConsumer, ReentrancyGuard, Ownable, Pausable {
 
     /// @notice Platform creator address
     address public immutable creator;
+
+    /// @notice Gift reserve for funding gifts
+    uint256 public giftReserve;
+
+    /// @notice Maximum payout per round
+    uint256 public maxPayoutPerRound = 10_000 * 10 ** 18; // 10k tokens
+
+    /// @notice Timelock storage for critical operations
+    mapping(bytes32 => uint256) public timelocks;
 
     // Round structure
     struct Round {
@@ -147,6 +162,9 @@ contract LotteryGame is VRFConsumer, ReentrancyGuard, Ownable, Pausable {
     event WinningsClaimed(uint256 indexed roundId, address indexed user, uint256 amount, uint8 matchCount);
     event GiftDistributed(uint256 indexed roundId, address indexed recipient, uint256 amount, bool isCreator);
     event GiftSettingsUpdated(uint256 recipientsCount, uint256 creatorAmount, uint256 userAmount);
+    event GiftReserveFunded(address indexed funder, uint256 amount);
+    event MaxPayoutUpdated(uint256 newMaxPayout);
+    event OperationScheduled(bytes32 indexed operationId, uint256 executeTime);
 
     // =============================================================
     //                            ERRORS
@@ -164,6 +182,10 @@ contract LotteryGame is VRFConsumer, ReentrancyGuard, Ownable, Pausable {
     error AlreadyClaimed();
     error GiftsAlreadyDistributed();
     error InvalidRound();
+    error InsufficientGiftReserve();
+    error PayoutExceedsMaximum();
+    error TimelockNotReady();
+    error OperationNotScheduled();
 
     // =============================================================
     //                         CONSTRUCTOR
@@ -175,9 +197,14 @@ contract LotteryGame is VRFConsumer, ReentrancyGuard, Ownable, Pausable {
         uint64 _subscriptionId,
         bytes32 _keyHash,
         address _creator
-    ) VRFConsumer(_vrfCoordinator, _subscriptionId, _keyHash) Ownable(msg.sender) {
+    ) VRFConsumer(_vrfCoordinator, _subscriptionId, _keyHash) {
         platformToken = IPlatformToken(_platformToken);
         creator = _creator;
+
+        // Setup roles
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(OPERATOR_ROLE, msg.sender);
+        _grantRole(GIFT_DISTRIBUTOR_ROLE, msg.sender);
 
         // Start first round
         _startNewRound();
@@ -345,6 +372,31 @@ contract LotteryGame is VRFConsumer, ReentrancyGuard, Ownable, Pausable {
         emit RoundStarted(currentRound, newRound.startTime, newRound.endTime);
     }
 
+    /**
+     * @notice Emergency draw numbers when VRF fails
+     * @param roundId Round to draw numbers for
+     * @param numbers Winning numbers to set
+     */
+    function emergencyDrawNumbers(uint256 roundId, uint256[NUMBERS_COUNT] calldata numbers)
+        external
+        onlyRole(OPERATOR_ROLE)
+    {
+        Round storage round = rounds[roundId];
+        require(!round.numbersDrawn, "Numbers already drawn");
+        require(block.timestamp > round.endTime + 1 hours, "Not enough time passed");
+
+        _validateNumbers(numbers);
+        round.winningNumbers = numbers;
+        round.numbersDrawn = true;
+
+        _calculateMatches(roundId);
+        emit NumbersDrawn(roundId, numbers);
+
+        if (roundId == currentRound) {
+            _startNewRound();
+        }
+    }
+
     // =============================================================
     //                        WINNING & CLAIMING
     // =============================================================
@@ -366,7 +418,7 @@ contract LotteryGame is VRFConsumer, ReentrancyGuard, Ownable, Pausable {
 
             if (bet.user != msg.sender) continue;
             if (bet.claimed) revert AlreadyClaimed();
-            if (bet.matchCount == 0) continue;
+            if (bet.matchCount < 2) continue; // Minimum 2 matches for payout
 
             uint256 payout = _calculatePayout(bet.amount, bet.matchCount);
             bet.claimed = true;
@@ -377,19 +429,44 @@ contract LotteryGame is VRFConsumer, ReentrancyGuard, Ownable, Pausable {
 
         if (totalWinnings == 0) revert NoWinnings();
 
+        // Check if total payout exceeds maximum
+        uint256 roundTotalPayout = _calculateTotalPayout(roundId);
+        if (roundTotalPayout > maxPayoutPerRound) revert PayoutExceedsMaximum();
+
         userStats[msg.sender].totalWinnings += totalWinnings;
         platformToken.transfer(msg.sender, totalWinnings);
     }
 
     /**
-     * @notice Calculate payout based on match count
+     * @notice Calculate payout based on match count with house edge
      */
     function _calculatePayout(uint256 betAmount, uint8 matchCount) internal pure returns (uint256) {
-        if (matchCount == 5) return betAmount * 1000; // 5 matches: 1000x
-        if (matchCount == 4) return betAmount * 100; // 4 matches: 100x
-        if (matchCount == 3) return betAmount * 10; // 3 matches: 10x
-        if (matchCount == 2) return betAmount * 2; // 2 matches: 2x
-        return 0; // Less than 2 matches: no payout
+        uint256 basePayout;
+        if (matchCount == 5) basePayout = betAmount * 800; // 800x (reduced from 1000x)
+
+        else if (matchCount == 4) basePayout = betAmount * 80; // 80x (reduced from 100x)
+
+        else if (matchCount == 3) basePayout = betAmount * 8; // 8x (reduced from 10x)
+
+        else if (matchCount == 2) basePayout = betAmount * 2; // 2x (same)
+
+        else return 0;
+
+        // Apply house edge
+        return basePayout * (10000 - HOUSE_EDGE) / 10000;
+    }
+
+    /**
+     * @notice Calculate total potential payout for a round
+     */
+    function _calculateTotalPayout(uint256 roundId) internal view returns (uint256 total) {
+        Bet[] storage bets = roundBets[roundId];
+
+        for (uint256 i = 0; i < bets.length; i++) {
+            if (bets[i].matchCount >= 2) {
+                total += _calculatePayout(bets[i].amount, bets[i].matchCount);
+            }
+        }
     }
 
     // =============================================================
@@ -397,18 +474,32 @@ contract LotteryGame is VRFConsumer, ReentrancyGuard, Ownable, Pausable {
     // =============================================================
 
     /**
+     * @notice Fund the gift reserve
+     * @param amount Amount of tokens to add to gift reserve
+     */
+    function fundGiftReserve(uint256 amount) external {
+        platformToken.transferFrom(msg.sender, address(this), amount);
+        giftReserve += amount;
+        emit GiftReserveFunded(msg.sender, amount);
+    }
+
+    /**
      * @notice Distribute gifts for completed round
      * @param roundId Round to distribute gifts for
      */
-    function distributeGifts(uint256 roundId) external onlyOwner {
+    function distributeGifts(uint256 roundId) external onlyRole(GIFT_DISTRIBUTOR_ROLE) {
         Round storage round = rounds[roundId];
         if (!round.numbersDrawn) revert NumbersNotDrawn();
         if (round.giftsDistributed) revert GiftsAlreadyDistributed();
+
+        uint256 totalGiftCost = creatorGiftAmount + (giftRecipientsCount * userGiftAmount);
+        if (giftReserve < totalGiftCost) revert InsufficientGiftReserve();
 
         round.giftsDistributed = true;
 
         // Gift creator
         platformToken.transfer(creator, creatorGiftAmount);
+        giftReserve -= creatorGiftAmount;
         emit GiftDistributed(roundId, creator, creatorGiftAmount, true);
 
         // Find eligible users for gifts
@@ -425,6 +516,7 @@ contract LotteryGame is VRFConsumer, ReentrancyGuard, Ownable, Pausable {
             userStats[recipient].lastGiftRound = roundId;
 
             platformToken.transfer(recipient, userGiftAmount);
+            giftReserve -= userGiftAmount;
             emit GiftDistributed(roundId, recipient, userGiftAmount, false);
         }
     }
@@ -588,7 +680,7 @@ contract LotteryGame is VRFConsumer, ReentrancyGuard, Ownable, Pausable {
             uint256 betIndex = userBets[i];
             Bet storage bet = roundBets[roundId][betIndex];
 
-            if (!bet.claimed && bet.matchCount > 1) {
+            if (!bet.claimed && bet.matchCount >= 2) {
                 claimable[count] = betIndex;
                 count++;
                 totalWinnings += _calculatePayout(bet.amount, bet.matchCount);
@@ -602,16 +694,46 @@ contract LotteryGame is VRFConsumer, ReentrancyGuard, Ownable, Pausable {
         }
     }
 
+    /**
+     * @notice Get gift reserve status
+     */
+    function getGiftReserveStatus() external view returns (uint256 reserve, uint256 costPerRound) {
+        reserve = giftReserve;
+        costPerRound = creatorGiftAmount + (giftRecipientsCount * userGiftAmount);
+    }
+
     // =============================================================
     //                        ADMIN FUNCTIONS
     // =============================================================
+
+    /**
+     * @notice Schedule max payout change (with timelock)
+     */
+    function scheduleMaxPayoutChange(uint256 _maxPayout) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        bytes32 operationId = keccak256(abi.encodePacked("setMaxPayout", _maxPayout));
+        timelocks[operationId] = block.timestamp + 24 hours;
+        emit OperationScheduled(operationId, timelocks[operationId]);
+    }
+
+    /**
+     * @notice Execute max payout change (after timelock)
+     */
+    function setMaxPayoutPerRound(uint256 _maxPayout) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        bytes32 operationId = keccak256(abi.encodePacked("setMaxPayout", _maxPayout));
+        if (timelocks[operationId] == 0) revert OperationNotScheduled();
+        if (block.timestamp < timelocks[operationId]) revert TimelockNotReady();
+
+        maxPayoutPerRound = _maxPayout;
+        delete timelocks[operationId];
+        emit MaxPayoutUpdated(_maxPayout);
+    }
 
     /**
      * @notice Update gift settings
      */
     function updateGiftSettings(uint256 _recipientsCount, uint256 _creatorAmount, uint256 _userAmount)
         external
-        onlyOwner
+        onlyRole(DEFAULT_ADMIN_ROLE)
     {
         giftRecipientsCount = _recipientsCount;
         creatorGiftAmount = _creatorAmount;
@@ -623,21 +745,30 @@ contract LotteryGame is VRFConsumer, ReentrancyGuard, Ownable, Pausable {
     /**
      * @notice Pause contract
      */
-    function pause() external onlyOwner {
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _pause();
     }
 
     /**
      * @notice Unpause contract
      */
-    function unpause() external onlyOwner {
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _unpause();
     }
 
     /**
      * @notice Emergency withdraw tokens
      */
-    function emergencyWithdraw(uint256 amount) external onlyOwner {
-        platformToken.transfer(owner(), amount);
+    function emergencyWithdraw(uint256 amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        platformToken.transfer(msg.sender, amount);
+    }
+
+    /**
+     * @notice Withdraw gift reserve (emergency only)
+     */
+    function emergencyWithdrawGiftReserve(uint256 amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(amount <= giftReserve, "Amount exceeds reserve");
+        giftReserve -= amount;
+        platformToken.transfer(msg.sender, amount);
     }
 }

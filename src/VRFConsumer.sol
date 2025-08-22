@@ -25,8 +25,8 @@ abstract contract VRFConsumer is VRFConsumerBaseV2 {
     //                            MAPPINGS
     // =============================================================
 
-    /// @notice VRF request ID to callback address mapping
-    mapping(uint256 => address) public vrfRequestToCallback;
+    /// @notice VRF request ID to requesting contract mapping
+    mapping(uint256 => bool) public validVRFRequests;
 
     // =============================================================
     //                            EVENTS
@@ -39,7 +39,6 @@ abstract contract VRFConsumer is VRFConsumerBaseV2 {
     //                            ERRORS
     // =============================================================
 
-    error OnlyVRFCoordinator();
     error InvalidVRFRequest();
 
     // =============================================================
@@ -65,18 +64,21 @@ abstract contract VRFConsumer is VRFConsumerBaseV2 {
         requestId =
             vrfCoordinator.requestRandomWords(keyHash, subscriptionId, requestConfirmations, callbackGasLimit, numWords);
 
-        vrfRequestToCallback[requestId] = msg.sender;
-        emit VRFRequested(requestId, msg.sender);
+        validVRFRequests[requestId] = true;
+        emit VRFRequested(requestId, address(this));
     }
 
     /**
      * @notice Chainlink VRF callback function
-     * @dev Must be implemented by the inheriting contract
+     * @dev Called by VRF Coordinator when random words are ready
      */
     function fulfillRandomWords(uint256 requestId, uint256[] memory randomWords) internal virtual override {
-        if (vrfRequestToCallback[requestId] == address(0)) {
+        if (!validVRFRequests[requestId]) {
             revert InvalidVRFRequest();
         }
+
+        // Clean up to prevent replay
+        delete validVRFRequests[requestId];
 
         emit VRFReceived(requestId, randomWords);
         _handleRandomWords(requestId, randomWords);
