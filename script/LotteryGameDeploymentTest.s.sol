@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "forge-std/Script.sol";
-import "../src/LotteryGame.sol";
+import {Script, console} from "forge-std/Script.sol";   
+import {LotteryGame} from "../src/LotteryGame.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract TestLottery is Script {
     function run() external {

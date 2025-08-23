@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "forge-std/Test.sol";
-import "../../src/LotteryGame.sol";
-import "../../src/PlatformToken.sol";
-import "../mocks/MockVRFCoordinator.sol";
+import {Test, console} from "forge-std/Test.sol";
+import {LotteryGame} from "../../src/LotteryGame.sol";
+import {PlatformToken} from "../../src/PlatformToken.sol";
+import {MockVRFCoordinator} from "../mocks/MockVRFCoordinator.sol";
 
 /**
  * @title LotteryGameIntegrationTest

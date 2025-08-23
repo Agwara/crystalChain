@@ -5,7 +5,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "./VRFConsumer.sol";
+import {VRFConsumer} from "./VRFConsumer.sol";
 
 interface IPlatformToken is IERC20 {
     function balanceOf(address account) external view returns (uint256);

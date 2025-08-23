@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "forge-std/Script.sol";
-import "../src/PlatformToken.sol";
+import {Script, console} from "forge-std/Script.sol"; 
+import {PlatformToken} from "../src/PlatformToken.sol";
 
 contract DeployPlatformToken is Script {
     // Deployment configuration

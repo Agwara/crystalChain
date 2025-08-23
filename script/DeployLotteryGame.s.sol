@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "forge-std/Script.sol";
-import "../src/LotteryGame.sol";
+import {Script, console} from "forge-std/Script.sol"; 
+import {LotteryGame} from "../src/LotteryGame.sol";
 
 contract DeployLotteryGame is Script {
     // Sepolia Chainlink VRF Configuration
