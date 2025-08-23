@@ -505,19 +505,25 @@ contract LotteryGame is VRFConsumer, ReentrancyGuard, AccessControl, Pausable {
         // Find eligible users for gifts
         address[] memory eligibleUsers = _getEligibleGiftRecipients(roundId);
 
-        uint256 recipientsToGift = giftRecipientsCount;
-        if (eligibleUsers.length < recipientsToGift) {
-            recipientsToGift = eligibleUsers.length;
-        }
+        if (eligibleUsers.length > 0) {
+            uint256 recipientsToGift = giftRecipientsCount;
+            if (eligibleUsers.length < recipientsToGift) {
+                recipientsToGift = eligibleUsers.length;
+            }
 
-        // Randomly select and gift users
-        for (uint256 i = 0; i < recipientsToGift; i++) {
-            address recipient = eligibleUsers[i];
-            userStats[recipient].lastGiftRound = roundId;
+            // Randomly select recipients using the round's winning numbers as entropy
+            address[] memory selectedRecipients =
+                _selectRandomRecipients(eligibleUsers, recipientsToGift, round.winningNumbers);
 
-            platformToken.transfer(recipient, userGiftAmount);
-            giftReserve -= userGiftAmount;
-            emit GiftDistributed(roundId, recipient, userGiftAmount, false);
+            // Gift selected users
+            for (uint256 i = 0; i < selectedRecipients.length; i++) {
+                address recipient = selectedRecipients[i];
+                userStats[recipient].lastGiftRound = roundId;
+
+                platformToken.transfer(recipient, userGiftAmount);
+                giftReserve -= userGiftAmount;
+                emit GiftDistributed(roundId, recipient, userGiftAmount, false);
+            }
         }
     }
 
@@ -550,6 +556,64 @@ contract LotteryGame is VRFConsumer, ReentrancyGuard, AccessControl, Pausable {
         }
 
         return result;
+    }
+
+    /**
+     * @notice Randomly select recipients from eligible users
+     * @param eligibleUsers Array of eligible user addresses
+     * @param count Number of recipients to select
+     * @param entropy Source of randomness (winning numbers)
+     * @return selectedUsers Array of randomly selected users
+     */
+    function _selectRandomRecipients(
+        address[] memory eligibleUsers,
+        uint256 count,
+        uint256[NUMBERS_COUNT] memory entropy
+    ) internal view returns (address[] memory) {
+        if (eligibleUsers.length <= count) {
+            return eligibleUsers; // Return all if we need more than available
+        }
+
+        address[] memory selected = new address[](count);
+        address[] memory remaining = new address[](eligibleUsers.length);
+
+        // Copy eligible users to remaining array
+        for (uint256 i = 0; i < eligibleUsers.length; i++) {
+            remaining[i] = eligibleUsers[i];
+        }
+
+        uint256 remainingCount = eligibleUsers.length;
+
+        // Generate additional entropy from the winning numbers
+        uint256 randomSeed = uint256(
+            keccak256(
+                abi.encodePacked(
+                    entropy[0],
+                    entropy[1],
+                    entropy[2],
+                    entropy[3],
+                    entropy[4],
+                    block.timestamp,
+                    block.prevrandao // More reliable than block.difficulty in post-merge Ethereum
+                )
+            )
+        );
+
+        // Fisher-Yates shuffle algorithm to randomly select recipients
+        for (uint256 i = 0; i < count; i++) {
+            // Generate random index
+            randomSeed = uint256(keccak256(abi.encodePacked(randomSeed, i)));
+            uint256 randomIndex = randomSeed % remainingCount;
+
+            // Select the user at random index
+            selected[i] = remaining[randomIndex];
+
+            // Remove selected user by swapping with last element
+            remaining[randomIndex] = remaining[remainingCount - 1];
+            remainingCount--;
+        }
+
+        return selected;
     }
 
     // =============================================================

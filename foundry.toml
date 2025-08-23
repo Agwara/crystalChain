@@ -1,4 +1,7 @@
 # foundry.toml
+
+# File system permissions - ADD THIS SECTION
+
 [profile.default]
 ffi = true
 src = "src"
@@ -8,6 +11,12 @@ remappings = [
   "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
   "@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/",
 ]
+
+fs_permissions = [
+  { access = "read", path = "./deployments" },
+  { access = "write", path = "./deployments" },
+]
+
 
 # Sepolia testnet configuration
 [rpc_endpoints]
