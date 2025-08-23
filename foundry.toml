@@ -47,8 +47,3 @@ no_match_test = "testFail"
 [profile.ci]
 fuzz = { runs = 10000 }
 verbosity = 4
-
-# Local testing
-[profile.local]
-verbosity = 2
-gas_reports = ["PlatformToken"]

@@ -64,11 +64,16 @@ contract PlaceBet is Script {
         address user = vm.addr(privateKey);
 
         // Example bet: numbers [5, 15, 25, 35, 45] with 1 token
-        uint256[5] memory numbers = [5, 15, 25, 35, 45];
+        // uint256[5] memory numbers = [5, 15, 25, 35, 45];
+        uint256[5] memory numbers = [uint256(5), uint256(15), uint256(25), uint256(35), uint256(45)];
         uint256 betAmount = 1 * 10 ** 18; // 1 token
 
-        console.log("Placing bet with numbers:", numbers[0], numbers[1], numbers[2], numbers[3], numbers[4]);
-        console.log("Bet amount:", betAmount);
+        console.log("Placing bet with numbers:");
+        console.log("Num1:", numbers[0]);
+        console.log("Num2:", numbers[1]);
+        console.log("Num3:", numbers[2]);
+        console.log("Num4:", numbers[3]);
+        console.log("Num5:", numbers[4]);
 
         vm.startBroadcast(privateKey);
 
@@ -180,14 +185,12 @@ contract CheckWinnings is Script {
             return;
         }
 
-        console.log(
-            "Winning numbers:",
-            round.winningNumbers[0],
-            round.winningNumbers[1],
-            round.winningNumbers[2],
-            round.winningNumbers[3],
-            round.winningNumbers[4]
-        );
+        console.log("Winning numbers:");
+        console.log(round.winningNumbers[0]);
+        console.log(round.winningNumbers[1]);
+        console.log(round.winningNumbers[2]);
+        console.log(round.winningNumbers[3]);
+        console.log(round.winningNumbers[4]);
 
         // Check claimable winnings
         (uint256 totalWinnings, uint256[] memory claimableBets) = lottery.getClaimableWinnings(roundId, user);
