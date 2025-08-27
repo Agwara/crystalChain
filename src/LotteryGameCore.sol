@@ -132,7 +132,7 @@ contract LotteryGameCore is VRFConsumer, ReentrancyGuard, AccessControl, Pausabl
     //                         CONSTRUCTOR
     // =============================================================
 
-    constructor(address _platformToken, address _vrfCoordinator, uint64 _subscriptionId, bytes32 _keyHash)
+    constructor(address _platformToken, address _vrfCoordinator, uint256 _subscriptionId, bytes32 _keyHash)
         VRFConsumer(_vrfCoordinator, _subscriptionId, _keyHash)
     {
         platformToken = IPlatformToken(_platformToken);

@@ -47,7 +47,8 @@ contract DeployLottery is Script {
     }
 
     function deployToSepolia(address platformToken, address creator) internal {
-        uint64 subscriptionId = uint64(vm.envUint("VRF_SUBSCRIPTION_ID"));
+        // uint64 subscriptionId = uint64(vm.envUint("VRF_SUBSCRIPTION_ID"));
+        uint256 subscriptionId = vm.envUint("VRF_SUBSCRIPTION_ID");
 
         console.log("Deploying to Sepolia...");
         console.log("VRF Subscription ID:", subscriptionId);
@@ -113,7 +114,7 @@ contract DeployLottery is Script {
         console.log("Admin Contract:", admin);
     }
 
-    function logNextSteps(bool isSepolia, uint64 subscriptionId) internal pure {
+    function logNextSteps(bool isSepolia, uint256 subscriptionId) internal pure {
         console.log("\n=== Next Steps ===");
         if (isSepolia) {
             console.log("1. Add Core Contract as VRF consumer:");
