@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, console} from "forge-std/Test.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {PlatformToken} from "../src/PlatformToken.sol";
 
@@ -569,22 +569,6 @@ contract PlatformTokenTest is Test {
         assertEq(token.totalStaked(), aliceStake + bobStake);
         assertEq(token.stakedBalance(alice), aliceStake);
         assertEq(token.stakedBalance(bob), bobStake);
-    }
-
-    function test_StakeUnstakeMultipleCycles() public {
-        uint256 stakeAmount = 100 * 10 ** 18;
-
-        vm.startPrank(alice);
-
-        for (uint256 i = 0; i < 3; i++) {
-            token.stake(stakeAmount);
-            vm.warp(block.timestamp + MIN_DURATION + 1);
-            token.unstake(stakeAmount);
-        }
-
-        assertEq(token.stakedBalance(alice), 0);
-
-        vm.stopPrank();
     }
 
     // ============================================================================

@@ -116,7 +116,6 @@ contract LotteryGameCore is VRFConsumer, ReentrancyGuard, AccessControl, Pausabl
 
     error InvalidNumbers();
     error BetAmountTooLow();
-    error BetAmountTooHigh();
     error ExceedsMaxBetPerRound();
     error RoundNotActive();
     error RoundNotEnded();
@@ -127,8 +126,6 @@ contract LotteryGameCore is VRFConsumer, ReentrancyGuard, AccessControl, Pausabl
     error InvalidRound();
     error PayoutExceedsMaximum();
     error UnauthorizedCaller();
-    error GiftContractAlreadySet();
-    error AdminContractAlreadySet();
     error NoZeroAddress();
 
     // =============================================================
