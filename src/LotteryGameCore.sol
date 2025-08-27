@@ -129,7 +129,7 @@ contract LotteryGameCore is VRFConsumer, ReentrancyGuard, AccessControl, Pausabl
     error UnauthorizedCaller();
     error GiftContractAlreadySet();
     error AdminContractAlreadySet();
-    error ZeroAddress();
+    error NoZeroAddress();
 
     // =============================================================
     //                         CONSTRUCTOR
@@ -288,6 +288,7 @@ contract LotteryGameCore is VRFConsumer, ReentrancyGuard, AccessControl, Pausabl
     // =============================================================
     //                        WINNING & CLAIMING
     // =============================================================
+    // Users can claim winnings for multiple bets in a single transaction
 
     function claimWinnings(uint256 roundId, uint256[] calldata betIndices) external nonReentrant {
         Round storage round = rounds[roundId];
@@ -423,7 +424,7 @@ contract LotteryGameCore is VRFConsumer, ReentrancyGuard, AccessControl, Pausabl
 
     // Alternative: Allow updating gift contract with additional security
     function updateGiftContract(address _giftContract) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (_giftContract == address(0)) revert ZeroAddress();
+        if (_giftContract == address(0)) revert NoZeroAddress();
 
         giftContract = _giftContract;
 
@@ -432,7 +433,7 @@ contract LotteryGameCore is VRFConsumer, ReentrancyGuard, AccessControl, Pausabl
 
     // Alternative: Allow updating admin contract with additional security
     function updateAdminContract(address _adminContract) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (_adminContract == address(0)) revert ZeroAddress();
+        if (_adminContract == address(0)) revert NoZeroAddress();
 
         adminContract = _adminContract;
 

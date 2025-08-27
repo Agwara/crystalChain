@@ -1,25 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {VRFConsumerBaseV2} from "@chainlink/contracts/src/v0.8/VRFConsumerBaseV2.sol";
-import {VRFCoordinatorV2Interface} from "@chainlink/contracts/src/v0.8/interfaces/VRFCoordinatorV2Interface.sol";
+import {VRFConsumerBaseV2Plus} from "@chainlink/contracts/src/v0.8/vrf/dev/VRFConsumerBaseV2Plus.sol";
+import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
 
 /**
  * @title VRFConsumer
  * @author Agwara Nnaemeka
- * @dev Abstract contract for Chainlink VRF integration
+ * @dev Abstract contract for Chainlink VRF v2.5 integration
  * @notice Handles VRF requests and responses, to be inherited by consumer contracts
  */
-abstract contract VRFConsumer is VRFConsumerBaseV2 {
+abstract contract VRFConsumer is VRFConsumerBaseV2Plus {
     // =============================================================
-    //                         CHAINLINK VRF
+    //                         CHAINLINK VRF V2.5
     // =============================================================
 
-    VRFCoordinatorV2Interface internal immutable vrfCoordinator;
-    uint64 internal immutable subscriptionId;
+    uint256 internal immutable subscriptionId;
     bytes32 internal immutable keyHash;
     uint32 internal constant callbackGasLimit = 2500000;
     uint16 internal constant requestConfirmations = 3;
+    bool internal constant nativePayment = false; // Set to true if paying with native token
 
     // =============================================================
     //                            MAPPINGS
@@ -45,8 +45,9 @@ abstract contract VRFConsumer is VRFConsumerBaseV2 {
     //                         CONSTRUCTOR
     // =============================================================
 
-    constructor(address _vrfCoordinator, uint64 _subscriptionId, bytes32 _keyHash) VRFConsumerBaseV2(_vrfCoordinator) {
-        vrfCoordinator = VRFCoordinatorV2Interface(_vrfCoordinator);
+    constructor(address _vrfCoordinator, uint256 _subscriptionId, bytes32 _keyHash)
+        VRFConsumerBaseV2Plus(_vrfCoordinator)
+    {
         subscriptionId = _subscriptionId;
         keyHash = _keyHash;
     }
@@ -56,13 +57,22 @@ abstract contract VRFConsumer is VRFConsumerBaseV2 {
     // =============================================================
 
     /**
-     * @notice Request random words from Chainlink VRF
+     * @notice Request random words from Chainlink VRF v2.5
      * @param numWords Number of random words to request
      * @return requestId The VRF request ID
      */
     function _requestRandomWords(uint32 numWords) internal returns (uint256 requestId) {
-        requestId =
-            vrfCoordinator.requestRandomWords(keyHash, subscriptionId, requestConfirmations, callbackGasLimit, numWords);
+        // Build the request struct for v2.5
+        VRFV2PlusClient.RandomWordsRequest memory request = VRFV2PlusClient.RandomWordsRequest({
+            keyHash: keyHash,
+            subId: subscriptionId,
+            requestConfirmations: requestConfirmations,
+            callbackGasLimit: callbackGasLimit,
+            numWords: numWords,
+            extraArgs: VRFV2PlusClient._argsToBytes(VRFV2PlusClient.ExtraArgsV1({nativePayment: nativePayment}))
+        });
+
+        requestId = s_vrfCoordinator.requestRandomWords(request);
 
         validVRFRequests[requestId] = true;
         emit VRFRequested(requestId, address(this));
@@ -72,7 +82,7 @@ abstract contract VRFConsumer is VRFConsumerBaseV2 {
      * @notice Chainlink VRF callback function
      * @dev Called by VRF Coordinator when random words are ready
      */
-    function fulfillRandomWords(uint256 requestId, uint256[] memory randomWords) internal virtual override {
+    function fulfillRandomWords(uint256 requestId, uint256[] calldata randomWords) internal virtual override {
         if (!validVRFRequests[requestId]) {
             revert InvalidVRFRequest();
         }
