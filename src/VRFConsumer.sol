@@ -17,7 +17,7 @@ abstract contract VRFConsumer is VRFConsumerBaseV2Plus {
 
     uint256 internal immutable subscriptionId;
     bytes32 internal immutable keyHash;
-    uint32 internal constant callbackGasLimit = 2500000;
+    uint32 internal constant callbackGasLimit = 300000;
     uint16 internal constant requestConfirmations = 3;
     bool internal constant nativePayment = false; // Set to true if paying with native token
 
