@@ -16,7 +16,7 @@ import {PlatformToken} from "../src/PlatformToken.sol";
 contract PostDeploymentTest is Script {
     // Test configuration
     uint256 constant TEST_STAKE_AMOUNT = 50 * 10 ** 18; // 50 PTK
-    uint256 constant TEST_BET_AMOUNT = 5 * 10 ** 18; // 5 PTK
+    uint256 constant TEST_BET_AMOUNT = 1 * 10 ** 18; // 5 PTK
     uint256 constant GIFT_FUND_AMOUNT = 1000 * 10 ** 18; // 1000 PTK
 
     // Contract instances
@@ -357,7 +357,7 @@ contract PostDeploymentTest is Script {
         uint256 weight = platformToken.getStakingWeight(testUser1);
 
         console.log("    Staked:", TEST_STAKE_AMOUNT);
-        console.log("    Eligible:", eligible);
+        console.log("    Eligible for benefits:", eligible);
         console.log("    Weight:", weight);
 
         vm.stopPrank();
@@ -370,13 +370,19 @@ contract PostDeploymentTest is Script {
         console.log("Testing betting flow...");
 
         // Setup multiple users for betting
+        console.log("Setup betting for user1");
         setupUserForBetting(testUser1);
+        console.log("Setup betting for user2");
         setupUserForBetting(testUser2);
+        console.log("Setup betting for user3");
         setupUserForBetting(testUser3);
 
         // Test placing bets
+        console.log("placing bet for user1");
         bool bet1 = placeBetAsUser(testUser1, [uint256(1), 5, 10, 15, 20]);
+        console.log("placing bet for user2");
         bool bet2 = placeBetAsUser(testUser2, [uint256(2), 7, 12, 25, 30]);
+        console.log("placing bet for user3");
         bool bet3 = placeBetAsUser(testUser3, [uint256(3), 9, 18, 35, 42]);
 
         if (!bet1 || !bet2 || !bet3) {
