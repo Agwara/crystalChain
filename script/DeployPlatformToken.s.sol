@@ -14,7 +14,7 @@ contract DeployPlatformToken is Script {
 
     function run() external {
         // Get deployer from private key
-        uint256 deployerPrivateKey = vm.envUint("ACCOUNT_b67_PRIVATE_KEY");
+        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         deployer = vm.addr(deployerPrivateKey);
 
         console.log("Deploying with account:", deployer);

@@ -245,8 +245,6 @@ contract LotteryGameCore is VRFConsumer, ReentrancyGuard, AccessControl, Pausabl
         round.winningNumbers = winningNumbers;
         round.numbersDrawn = true;
 
-        _calculateMatches(roundId);
-
         emit NumbersDrawn(roundId, winningNumbers);
 
         if (roundId == currentRound) {
@@ -274,7 +272,6 @@ contract LotteryGameCore is VRFConsumer, ReentrancyGuard, AccessControl, Pausabl
         round.winningNumbers = numbers;
         round.numbersDrawn = true;
 
-        _calculateMatches(roundId);
         emit NumbersDrawn(roundId, numbers);
 
         if (roundId == currentRound) {
@@ -299,6 +296,13 @@ contract LotteryGameCore is VRFConsumer, ReentrancyGuard, AccessControl, Pausabl
 
             if (bet.user != msg.sender) continue;
             if (bet.claimed) revert AlreadyClaimed();
+
+            // Calculate matches on-demand only for this specific bet
+            if (bet.matchCount == 0) {
+                // Only calculate if not already calculated
+                bet.matchCount = _calculateSingleBetMatches(bet.numbers, round.winningNumbers);
+            }
+
             if (bet.matchCount < 2) continue;
 
             uint256 payout = _calculatePayout(bet.amount, bet.matchCount);
@@ -315,6 +319,22 @@ contract LotteryGameCore is VRFConsumer, ReentrancyGuard, AccessControl, Pausabl
 
         userStats[msg.sender].totalWinnings += totalWinnings;
         platformToken.transfer(msg.sender, totalWinnings);
+    }
+
+    // New function to calculate matches for a single bet
+    function _calculateSingleBetMatches(uint256[5] memory betNumbers, uint256[5] memory winningNumbers)
+        internal
+        pure
+        returns (uint8 matches)
+    {
+        for (uint256 j = 0; j < 5; j++) {
+            for (uint256 k = 0; k < 5; k++) {
+                if (betNumbers[j] == winningNumbers[k]) {
+                    matches++;
+                    break;
+                }
+            }
+        }
     }
 
     function _calculatePayout(uint256 betAmount, uint8 matchCount) internal pure returns (uint256) {
@@ -385,26 +405,6 @@ contract LotteryGameCore is VRFConsumer, ReentrancyGuard, AccessControl, Pausabl
         }
 
         return numbers;
-    }
-
-    function _calculateMatches(uint256 roundId) internal {
-        Round storage round = rounds[roundId];
-        Bet[] storage bets = roundBets[roundId];
-
-        for (uint256 i = 0; i < bets.length; i++) {
-            uint8 matches = 0;
-
-            for (uint256 j = 0; j < 5; j++) {
-                for (uint256 k = 0; k < 5; k++) {
-                    if (bets[i].numbers[j] == round.winningNumbers[k]) {
-                        matches++;
-                        break;
-                    }
-                }
-            }
-
-            bets[i].matchCount = matches;
-        }
     }
 
     // =============================================================
@@ -493,10 +493,12 @@ contract LotteryGameCore is VRFConsumer, ReentrancyGuard, AccessControl, Pausabl
             uint256 betIndex = userBets[i];
             Bet storage bet = roundBets[roundId][betIndex];
 
-            if (!bet.claimed && bet.matchCount >= 2) {
+            uint8 totalMatches = _calculateSingleBetMatches(bet.numbers, round.winningNumbers);
+
+            if (!bet.claimed && totalMatches >= 2) {
                 claimable[count] = betIndex;
                 count++;
-                totalWinnings += _calculatePayout(bet.amount, bet.matchCount);
+                totalWinnings += _calculatePayout(bet.amount, totalMatches);
             }
         }
 
