@@ -10,7 +10,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 /**
  * @title PlatformToken
  * @author Agwara Nnaemeka
- * @dev ERC20 token with staking, burning, and gambling platform features
+ * @dev ERC20 token with staking, burning, gambling platform features, and one-time bonus system
  * @notice This token is designed specifically for the decentralized gambling platform
  */
 contract PlatformToken is ERC20, Ownable, ReentrancyGuard, Pausable {
@@ -29,6 +29,12 @@ contract PlatformToken is ERC20, Ownable, ReentrancyGuard, Pausable {
 
     /// @notice Burn rate in basis points (100 = 1%)
     uint256 public constant BURN_RATE = 500; // 5%
+
+    /// @notice Default gift amount for new users (transferred to wallet)
+    uint256 public constant DEFAULT_GIFT_AMOUNT = 200 * 10 ** 18; // 200 tokens
+
+    /// @notice Default stake amount for new users (auto-staked)
+    uint256 public constant DEFAULT_STAKE_AMOUNT = 50 * 10 ** 18; // 50 tokens
 
     // =============================================================
     //                            STORAGE
@@ -56,6 +62,28 @@ contract PlatformToken is ERC20, Ownable, ReentrancyGuard, Pausable {
     bool public emergencyWithdrawalEnabled;
 
     // =============================================================
+    //                        BONUS SYSTEM STORAGE
+    // =============================================================
+
+    /// @notice Tracks whether a user has claimed their one-time bonus
+    mapping(address => bool) public hasBonusClaimed;
+
+    /// @notice Total number of bonuses claimed
+    uint256 public totalBonusesClaimed;
+
+    /// @notice Total amount of bonus tokens distributed (gifts + stakes)
+    uint256 public totalBonusDistributed;
+
+    /// @notice Whether the bonus system is currently active
+    bool public bonusSystemActive = true;
+
+    /// @notice Current gift amount (can be modified by owner)
+    uint256 public currentGiftAmount = DEFAULT_GIFT_AMOUNT;
+
+    /// @notice Current auto-stake amount (can be modified by owner)
+    uint256 public currentStakeAmount = DEFAULT_STAKE_AMOUNT;
+
+    // =============================================================
     //                            EVENTS
     // =============================================================
 
@@ -65,6 +93,9 @@ contract PlatformToken is ERC20, Ownable, ReentrancyGuard, Pausable {
     event AuthorizedBurnerUpdated(address indexed burner, bool authorized);
     event AuthorizedTransferorUpdated(address indexed transferor, bool authorized);
     event EmergencyWithdrawalToggled(bool enabled);
+    event BonusClaimed(address indexed user, uint256 giftAmount, uint256 stakeAmount);
+    event BonusSystemToggled(bool active);
+    event BonusAmountsUpdated(uint256 newGiftAmount, uint256 newStakeAmount);
 
     // =============================================================
     //                            ERRORS
@@ -79,6 +110,9 @@ contract PlatformToken is ERC20, Ownable, ReentrancyGuard, Pausable {
     error UnauthorizedTransferor();
     error EmergencyWithdrawalDisabled();
     error ZeroAmount();
+    error BonusAlreadyClaimed();
+    error BonusSystemInactive();
+    error InsufficientContractBalance();
 
     // =============================================================
     //                         CONSTRUCTOR
@@ -93,6 +127,83 @@ contract PlatformToken is ERC20, Ownable, ReentrancyGuard, Pausable {
 
         emit AuthorizedBurnerUpdated(msg.sender, true);
         emit AuthorizedTransferorUpdated(msg.sender, true);
+    }
+
+    // =============================================================
+    //                      BONUS SYSTEM FUNCTIONS
+    // =============================================================
+
+    /**
+     * @notice Claim one-time bonus: gift tokens to wallet and automatically stake some
+     * @dev Users receive gift tokens in their wallet + auto-staked tokens. Can only claim once.
+     */
+    function claimBonusAndStake() external nonReentrant whenNotPaused {
+        if (hasBonusClaimed[msg.sender]) revert BonusAlreadyClaimed();
+        if (!bonusSystemActive) revert BonusSystemInactive();
+
+        uint256 totalRequired = currentGiftAmount + currentStakeAmount;
+        if (balanceOf(address(this)) < totalRequired) revert InsufficientContractBalance();
+
+        // Check if staking the bonus amount would exceed maximum stake limit
+        if (stakedBalance[msg.sender] + currentStakeAmount > MAX_STAKE_PER_USER) {
+            revert ExceedsMaximumStakeAmount();
+        }
+
+        // Mark bonus as claimed
+        hasBonusClaimed[msg.sender] = true;
+
+        // Transfer gift tokens to user's wallet
+        _transfer(address(this), msg.sender, currentGiftAmount);
+
+        // Auto-stake the stake amount (tokens stay in contract, update mappings)
+        stakedBalance[msg.sender] += currentStakeAmount;
+        stakingTimestamp[msg.sender] = block.timestamp;
+        totalStaked += currentStakeAmount;
+
+        // Update bonus statistics
+        totalBonusesClaimed += 1;
+        totalBonusDistributed += totalRequired;
+
+        emit BonusClaimed(msg.sender, currentGiftAmount, currentStakeAmount);
+        emit TokensStaked(msg.sender, currentStakeAmount, stakedBalance[msg.sender]);
+    }
+
+    /**
+     * @notice Check if user is eligible for bonus
+     * @param user Address to check
+     * @return eligible True if user hasn't claimed bonus and system is active
+     */
+    function isEligibleForBonus(address user) external view returns (bool eligible) {
+        return !hasBonusClaimed[user] && bonusSystemActive;
+    }
+
+    /**
+     * @notice Get bonus system statistics
+     * @return active Whether bonus system is active
+     * @return currentGift Current gift amount (transferred to wallet)
+     * @return currentStake Current auto-stake amount
+     * @return totalClaimed Total number of bonuses claimed
+     * @return totalDistributed Total amount of bonus tokens distributed
+     * @return contractBalance Current contract balance available for bonuses
+     */
+    function getBonusStats()
+        external
+        view
+        returns (
+            bool active,
+            uint256 currentGift,
+            uint256 currentStake,
+            uint256 totalClaimed,
+            uint256 totalDistributed,
+            uint256 contractBalance
+        )
+    {
+        active = bonusSystemActive;
+        currentGift = currentGiftAmount;
+        currentStake = currentStakeAmount;
+        totalClaimed = totalBonusesClaimed;
+        totalDistributed = totalBonusDistributed;
+        contractBalance = balanceOf(address(this)) - totalStaked; // Available for bonuses
     }
 
     // =============================================================
@@ -263,6 +374,42 @@ contract PlatformToken is ERC20, Ownable, ReentrancyGuard, Pausable {
     function toggleEmergencyWithdrawal(bool enabled) external onlyOwner {
         emergencyWithdrawalEnabled = enabled;
         emit EmergencyWithdrawalToggled(enabled);
+    }
+
+    /**
+     * @notice Toggle bonus system on/off
+     * @param active True to activate, false to deactivate
+     */
+    function toggleBonusSystem(bool active) external onlyOwner {
+        bonusSystemActive = active;
+        emit BonusSystemToggled(active);
+    }
+
+    /**
+     * @notice Update bonus amounts
+     * @param newGiftAmount New gift amount to transfer to user wallet
+     * @param newStakeAmount New amount to auto-stake for users
+     * @dev Both amounts must meet minimum requirements and stake amount can't exceed max per user
+     */
+    function updateBonusAmounts(uint256 newGiftAmount, uint256 newStakeAmount) external onlyOwner {
+        require(newGiftAmount > 0, "Gift amount must be positive");
+        require(newStakeAmount >= MIN_STAKE_AMOUNT, "Stake amount too low");
+        require(newStakeAmount <= MAX_STAKE_PER_USER, "Stake amount too high");
+
+        currentGiftAmount = newGiftAmount;
+        currentStakeAmount = newStakeAmount;
+        emit BonusAmountsUpdated(newGiftAmount, newStakeAmount);
+    }
+
+    /**
+     * @notice Deposit tokens to contract for bonus distribution
+     * @param amount Amount of tokens to deposit
+     * @dev Owner can deposit tokens to fund the bonus system
+     */
+    function depositForBonuses(uint256 amount) external onlyOwner {
+        if (amount == 0) revert ZeroAmount();
+        if (balanceOf(msg.sender) < amount) revert InsufficientBalance();
+        _transfer(msg.sender, address(this), amount);
     }
 
     // =============================================================
